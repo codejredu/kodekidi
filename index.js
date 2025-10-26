@@ -1,4 +1,5 @@
 
+
 import { initCharacterCreator } from './Caracter.js';
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -1326,10 +1327,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     Blockly.JavaScript['event_broadcast'] = function(block) {
         const message = block.getFieldValue('MESSAGE');
+        const varName = `event_${block.id.replace(/[^a-zA-Z0-9]/g, '_')}_${Math.floor(Math.random() * 999999)}`;
         return `
             log('משדר מסר: ${message}');
-            const event = new CustomEvent('kidi-broadcast', { detail: { message: '${message}' } });
-            window.dispatchEvent(event);
+            const ${varName} = new CustomEvent('kidi-broadcast', { detail: { message: '${message}' } });
+            window.dispatchEvent(${varName});
             yield;
         `;
     };
@@ -1492,8 +1494,8 @@ document.addEventListener('DOMContentLoaded', () => {
     Blockly.JavaScript['looks_say_for_secs'] = function(block) {
         const message = Blockly.JavaScript.valueToCode(block, 'MESSAGE', Blockly.JavaScript.ORDER_ATOMIC) || "''";
         const secs = Blockly.JavaScript.valueToCode(block, 'SECS', Blockly.JavaScript.ORDER_ATOMIC) || '2';
-        // Sanitize the block ID to create a valid JavaScript variable name.
-        const varName = `endTime_${block.id.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        // Sanitize the block ID and add random suffix to create a truly unique variable name.
+        const varName = `endTime_${block.id.replace(/[^a-zA-Z0-9]/g, '_')}_${Math.floor(Math.random() * 999999)}`;
         return `
             if (sprite) {
                 const spriteEl = document.getElementById(sprite.id);
@@ -1806,8 +1808,8 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     Blockly.JavaScript['control_wait_secs'] = function(block) {
         const secs = Blockly.JavaScript.valueToCode(block, 'SECS', Blockly.JavaScript.ORDER_ATOMIC) || '1';
-        // Sanitize the block ID to create a valid JavaScript variable name.
-        const varName = `endTime_${block.id.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        // Sanitize the block ID and add random suffix to create a truly unique variable name.
+        const varName = `endTime_${block.id.replace(/[^a-zA-Z0-9]/g, '_')}_${Math.floor(Math.random() * 999999)}`;
         return `
             log('המתנה של ' + (${secs}) + ' שניות...');
             const ${varName} = Date.now() + (${secs}) * 1000;
@@ -2437,9 +2439,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     const blocklyDiv = document.getElementById('blockly-area');
-    blocklyDiv.addEventListener('click', (event) => {
+    blocklyDiv.addEventListener('click', (e) => {
         if (scriptRunner && scriptRunner.isRunning) return;
-        const blocklyBlockSvg = event.target.closest('.blocklyDraggable');
+        const blocklyBlockSvg = e.target.closest('.blocklyDraggable');
         if (blocklyBlockSvg) {
             const blockId = blocklyBlockSvg.getAttribute('data-id');
             if (blockId) {
@@ -2767,9 +2769,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
 
-    function handleKeyPress(event) {
+    function handleKeyPress(e) {
         const keyMap = { 'SPACE': ' ', 'UP': 'ArrowUp', 'DOWN': 'ArrowDown', 'RIGHT': 'ArrowRight', 'LEFT': 'ArrowLeft' };
-        const pressedKey = event.key;
+        const pressedKey = e.key;
         
         saveActiveSpriteWorkspace();
         if (!scriptRunner || !scriptRunner.isRunning) {
@@ -2792,8 +2794,8 @@ document.addEventListener('DOMContentLoaded', () => {
                             const generator = createGeneratorForStack(startBlock, sprite);
                             if (generator) scriptRunner.add(generator);
                         });
-                } catch(e) {
-                    console.error("Error in handleKeyPress workspace processing:", e);
+                } catch(err) {
+                    console.error("Error in handleKeyPress workspace processing:", err);
                 } finally {
                     tempWorkspace.dispose();
                 }

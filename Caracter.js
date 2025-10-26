@@ -226,7 +226,9 @@ class CharacterCreator {
 
         this.canvas.addEventListener('mousedown', (e) => this.handleCanvasMouseDown(e));
         this.canvas.addEventListener('mousemove', (e) => this.handleCanvasMouseMove(e));
-        document.addEventListener('mouseup', () => this.handleCanvasMouseUp());
+        document.addEventListener('mouseup', (e) => this.handleCanvasMouseUp(e));
+        document.addEventListener('touchend', (e) => this.handleCanvasMouseUp(e));
+        document.addEventListener('touchcancel', (e) => this.handleCanvasMouseUp(e));
         this.canvas.addEventListener('mouseleave', () => this.handleCanvasMouseLeave());
     }
     
@@ -740,18 +742,21 @@ class CharacterCreator {
         this.draw();
     }
     
-    handleCanvasMouseUp() {
+    handleCanvasMouseUp(e) {
         if (this.action.type !== 'none') {
-            const rect = this.canvas.getBoundingClientRect();
-            const { clientX, clientY } = (event.touches ? event.touches[0] : event);
-            const mouseX = clientX - rect.left;
-            const mouseY = clientY - rect.top;
-            
-            const handleInfo = this.selectedPartOnCanvas ? this.getHandleAt(mouseX, mouseY) : null;
-            if (handleInfo) {
-                 this.canvas.style.cursor = handleInfo.handle.cursor;
-            } else if (this.getPartAt(mouseX, mouseY)) {
-                this.canvas.style.cursor = 'grab';
+            if (e) {
+                const rect = this.canvas.getBoundingClientRect();
+                const pointer = e.changedTouches ? e.changedTouches[0] : e;
+                const { clientX, clientY } = pointer;
+                const mouseX = clientX - rect.left;
+                const mouseY = clientY - rect.top;
+
+                const handleInfo = this.selectedPartOnCanvas ? this.getHandleAt(mouseX, mouseY) : null;
+                if (handleInfo) {
+                    this.canvas.style.cursor = handleInfo.handle.cursor;
+                } else if (this.getPartAt(mouseX, mouseY)) {
+                    this.canvas.style.cursor = 'grab';
+                }
             }
         }
         this.action.type = 'none';
