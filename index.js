@@ -294,6 +294,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const propRotationAllAround = document.getElementById('rotation-all-around');
     const propRotationLeftRight = document.getElementById('rotation-left-right');
     const propRotationDontRotate = document.getElementById('rotation-dont-rotate');
+    const scrollPanelUp = document.getElementById('scroll-panel-up');
+    const scrollPanelDown = document.getElementById('scroll-panel-down');
+    const leftPanel = document.querySelector('.left-panel');
     
     // --- Angle Picker elements ---
     const anglePickerWidget = document.getElementById('angle-picker-widget');
@@ -3115,6 +3118,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Properties Panel Listeners ---
     function setupPropertiesPanelListeners() {
+        if (scrollPanelUp && scrollPanelDown && leftPanel) {
+            scrollPanelUp.addEventListener('click', () => {
+                leftPanel.scrollTo({
+                    top: 0,
+                    behavior: 'smooth'
+                });
+            });
+
+            scrollPanelDown.addEventListener('click', () => {
+                leftPanel.scrollTo({
+                    top: leftPanel.scrollHeight,
+                    behavior: 'smooth'
+                });
+            });
+        }
+        
         propName.addEventListener('change', (e) => {
             const sprite = getActiveSprite();
             if (sprite) sprite.name = e.target.value;
