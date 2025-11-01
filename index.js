@@ -348,8 +348,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let activeSpriteId = null;
     let executionCancelled = false;
     let isLoadingProject = false;
-    let justDragged = false;
-    let dragStartX, dragStartY;
+    let dragStartInfo = null;
     let collisionState = new Set();
     let scriptRunner = null;
     let lastTimestamp = 0;
@@ -357,6 +356,37 @@ document.addEventListener('DOMContentLoaded', () => {
     // Make frameDeltaTime accessible globally so the generated code can see it.
     window.frameDeltaTime = 1000 / 60; // Time in ms for one frame at 60fps.
     
+    /**
+     * Checks if a sprite is off-stage and wraps its position to the other side if so.
+     * @param {object} sprite The sprite object to check and modify.
+     */
+    function applyStageWrapping(sprite) {
+        if (!sprite) return;
+        const halfWidth = STAGE_WIDTH / 2;
+        const halfHeight = STAGE_HEIGHT / 2;
+        // Base size is 160, as defined in updateSpriteAppearance
+        const spriteLogicalWidth = 160 * (sprite.size / 100); 
+        const spriteLogicalHeight = 160 * (sprite.size / 100);
+        const spriteHalfWidth = spriteLogicalWidth / 2;
+        const spriteHalfHeight = spriteLogicalHeight / 2;
+
+        // Check horizontal wrapping
+        if (sprite.x - spriteHalfWidth > halfWidth) { // Gone off right edge
+            sprite.x = -halfWidth - spriteHalfWidth;
+        } else if (sprite.x + spriteHalfWidth < -halfWidth) { // Gone off left edge
+            sprite.x = halfWidth + spriteHalfWidth;
+        }
+
+        // Check vertical wrapping
+        // Note: In our stage coordinates, +180 is the top, -180 is the bottom.
+        if (sprite.y - spriteHalfHeight > halfHeight) { // Gone off top edge
+            sprite.y = -halfHeight - spriteHalfHeight;
+        } else if (sprite.y + spriteHalfHeight < -halfHeight) { // Gone off bottom edge
+            sprite.y = halfHeight + spriteHalfHeight;
+        }
+    }
+    window.applyStageWrapping = applyStageWrapping; // Make it accessible to generated code.
+
     // --- Sound System State ---
     let currentPreviewAudio = null;
     let selectedSoundsForAdd = new Set();
@@ -377,6 +407,11 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const openGallery = (galleryToOpen) => {
+        // Cancel any ongoing sprite drag operation to prevent stale state issues.
+        isDragging = false;
+        dragSpriteId = null;
+        dragStartInfo = null;
+        
         allGalleries.forEach(gallery => {
             if (gallery !== galleryToOpen) {
                 gallery.classList.remove('visible');
@@ -775,20 +810,33 @@ document.addEventListener('DOMContentLoaded', () => {
         return spriteCard;
     }
 
-    const createNewSprite = (name, imageUrl, initialX = 0, initialY = 0, isCustom = false, characterData = null, gifSpeed = 1.0) => {
+    const createNewSprite = (name, imageUrl, options = {}) => {
+        const { 
+            initialX, 
+            initialY, 
+            isCustom = false, 
+            characterData = null, 
+            gifSpeed = 1.0 
+        } = options;
+    
         const id = `sprite-${Date.now()}`;
         const isGif = imageUrl.toLowerCase().endsWith('.gif') || imageUrl.startsWith('data:image/gif');
-
+    
+        // If no position is provided, randomize it to prevent collision on creation.
+        const xPos = initialX !== undefined ? initialX : Math.round((Math.random() * (STAGE_WIDTH - 120)) - (STAGE_WIDTH / 2 - 60));
+        const yPos = initialY !== undefined ? initialY : Math.round((Math.random() * (STAGE_HEIGHT - 120)) - (STAGE_HEIGHT / 2 - 60));
+    
         const spriteData = {
             id,
             name,
             imageUrl,
-            x: initialX,
-            y: initialY,
+            x: xPos,
+            y: yPos,
             direction: 90,
             opacity: 1,
             size: 100,
             rotationStyle: 'all-around',
+            speed: 'instant', // New property for movement speed
             workspaceXml: null,
             isCustom: isCustom,
             characterData: characterData,
@@ -800,13 +848,13 @@ document.addEventListener('DOMContentLoaded', () => {
         };
         
         sprites[id] = spriteData;
-
+    
         createAndAttachSpriteCard(spriteData);
-
+    
         const spriteContainer = document.createElement('div');
         spriteContainer.id = `container-${id}`;
         spriteContainer.classList.add('sprite-container');
-
+    
         const mainSprite = document.createElement('div');
         mainSprite.classList.add('sprite-wrapper');
         mainSprite.id = id;
@@ -818,20 +866,15 @@ document.addEventListener('DOMContentLoaded', () => {
         
         spriteContainer.appendChild(mainSprite);
         stageArea.appendChild(spriteContainer);
-
+    
         if (isGif) {
             loadGifData(spriteData);
         }
         
         const wrapper = spriteContainer.querySelector('.sprite-wrapper');
-        wrapper.addEventListener('click', (e) => {
-            e.stopPropagation();
-            if (justDragged) return;
-            handleSpriteClick(id);
-        });
         wrapper.addEventListener('mousedown', (e) => startDrag(e, id));
         wrapper.addEventListener('touchstart', (e) => startDrag(e, id));
-
+    
         setActiveSprite(id);
         updateSpriteAppearance(id);
         refreshVisibleBumpBlocks(); // Refresh blocks on other sprites
@@ -971,8 +1014,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
         setActiveSprite(id);
         const { x, y } = getPointerPosition(e);
-        dragStartX = x;
-        dragStartY = y;
+
+        dragStartInfo = {
+            x: x,
+            y: y,
+            time: Date.now()
+        };
+        
         initialMouseX = x;
         initialMouseY = y;
         initialSpriteX = spriteData.x;
@@ -983,43 +1031,67 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const drag = (e) => {
         if (isDragging && dragSpriteId) {
+            const pointer = getPointerPosition(e);
+            
+            // Calculate new sprite position based on total drag distance from start
             const spriteData = sprites[dragSpriteId];
-            const { x, y } = getPointerPosition(e);
-            const deltaX = x - initialMouseX;
-            const deltaY = y - initialMouseY;
+            const totalDeltaX = pointer.x - initialMouseX;
+            const totalDeltaY = pointer.y - initialMouseY;
             
             const rect = stageArea.getBoundingClientRect();
             const scaleX = STAGE_WIDTH / rect.width;
             const scaleY = STAGE_HEIGHT / rect.height;
 
-            spriteData.x = initialSpriteX + deltaX * scaleX;
-            spriteData.y = initialSpriteY - deltaY * scaleY;
+            spriteData.x = initialSpriteX + totalDeltaX * scaleX;
+            spriteData.y = initialSpriteY - totalDeltaY * scaleY; // Y is inverted
             
             window.refreshSprite(spriteData);
         }
     };
 
     const endDrag = (e) => {
-        if (isDragging && dragSpriteId) {
-             const pointer = e.changedTouches ? e.changedTouches[0] : e;
-            const deltaX = pointer.clientX - dragStartX;
-            const deltaY = pointer.clientY - dragStartY;
-            const distance = Math.sqrt(deltaX*deltaX + deltaY*deltaY);
-
-            if (distance > 5) { // Threshold to differentiate click from drag
-                justDragged = true;
-                setTimeout(() => { justDragged = false; }, 50);
-            } else {
-                justDragged = false;
-            }
-
-            const spriteData = sprites[dragSpriteId];
-            window.refreshSprite(spriteData); // Final update
-            log(`הדמות נגררה למיקום חדש (x: ${spriteData.x.toFixed(0)}, y: ${spriteData.y.toFixed(0)})`);
+        // If a drag operation was in progress but the mouse was released outside the stage area
+        // (e.g., on a gallery button), we should cancel the drag and not treat it as a click.
+        if (isDragging && !e.target.closest('#stage-area')) {
+            isDragging = false;
+            dragSpriteId = null;
+            dragStartInfo = null;
+            return;
         }
+
+        if (!isDragging || !dragSpriteId) {
+            isDragging = false;
+            dragSpriteId = null;
+            dragStartInfo = null;
+            return;
+        }
+
+        const endedDragSpriteId = dragSpriteId;
+        const pointer = getPointerPosition(e.changedTouches ? e.changedTouches[0] : e);
+
+        const deltaX = pointer.x - dragStartInfo.x;
+        const deltaY = pointer.y - dragStartInfo.y;
+        const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+        const duration = Date.now() - dragStartInfo.time;
+
+        const CLICK_THRESHOLD_PX = 5;
+        const CLICK_THRESHOLD_MS = 300;
+
+        if (distance < CLICK_THRESHOLD_PX && duration < CLICK_THRESHOLD_MS) {
+            handleSpriteClick(endedDragSpriteId);
+        } else {
+            const spriteData = sprites[endedDragSpriteId];
+            if (spriteData) {
+                window.refreshSprite(spriteData); // Final position update
+                log(`הדמות נגררה למיקום חדש (x: ${spriteData.x.toFixed(0)}, y: ${spriteData.y.toFixed(0)})`);
+            }
+        }
+
         isDragging = false;
         dragSpriteId = null;
+        dragStartInfo = null;
     };
+
 
     stageArea.addEventListener('mousemove', drag);
     stageArea.addEventListener('touchmove', drag);
@@ -1368,37 +1440,95 @@ document.addEventListener('DOMContentLoaded', () => {
         const steps = Blockly.JavaScript.valueToCode(block, 'STEPS', Blockly.JavaScript.ORDER_ATOMIC) || '10';
         return `
             if (sprite) {
-                // Normalize movement to a target of 30 FPS for consistent speed
-                const distance = Number(${steps}) * 30 * (window.frameDeltaTime / 1000);
+                const totalSteps = Number(${steps});
                 const radians = sprite.direction * Math.PI / 180;
-                sprite.x += distance * Math.sin(radians);
-                sprite.y += distance * Math.cos(radians);
-                
-                const halfWidth = ${STAGE_WIDTH / 2};
-                const halfHeight = ${STAGE_HEIGHT / 2};
-                const spriteLogicalWidth = 160 * (sprite.size / 100);
-                const spriteLogicalHeight = 160 * (sprite.size / 100);
-                const spriteHalfWidth = spriteLogicalWidth / 2;
-                const spriteHalfHeight = spriteLogicalHeight / 2;
+    
+                if (sprite.speed && sprite.speed !== 'instant' && totalSteps !== 0) {
+                    // Smooth, frame-by-frame movement
+                    const speeds = { slow: 50, normal: 150, fast: 300 };
+                    const stepsPerSecond = speeds[sprite.speed] || 150;
+                    
+                    let stepsRemaining = Math.abs(totalSteps);
 
-                if (sprite.x - spriteHalfWidth > halfWidth) {
-                    sprite.x = -halfWidth - spriteHalfWidth;
-                }
-                if (sprite.x + spriteHalfWidth < -halfWidth) {
-                    sprite.x = halfWidth + spriteHalfWidth;
-                }
-                if (sprite.y - spriteHalfHeight > halfHeight) {
-                    sprite.y = -halfHeight - spriteHalfHeight;
-                }
-                if (sprite.y + spriteHalfHeight < -halfHeight) {
-                    sprite.y = halfHeight + spriteHalfHeight;
-                }
+                    while (stepsRemaining > 0) {
+                        if (getExecutionCancelled()) break;
 
-                window.refreshSprite(sprite);
+                        const stepsThisFrame = Math.min(stepsRemaining, (window.frameDeltaTime / 1000) * stepsPerSecond);
+                        
+                        const moveAmount = Math.sign(totalSteps) * stepsThisFrame;
+                        sprite.x += moveAmount * Math.sin(radians);
+                        sprite.y += moveAmount * Math.cos(radians);
+                        stepsRemaining -= stepsThisFrame;
+                        
+                        window.applyStageWrapping(sprite);
+                        window.refreshSprite(sprite);
+                        
+                        yield; // Wait for the next frame
+                    }
+                } else {
+                    // Instant movement
+                    sprite.x += totalSteps * Math.sin(radians);
+                    sprite.y += totalSteps * Math.cos(radians);
+                    window.applyStageWrapping(sprite);
+                    window.refreshSprite(sprite);
+                    yield; // Yield to render the change
+                }
+            }
+        `;
+    };
+    
+    Blockly.Blocks['motion_set_speed'] = {
+        init: function() {
+            const speedOptions = [
+                [
+                    {
+                        src: 'https://codejredu.github.io/test/assets/blocklyicon/slow.svg',
+                        width: 32,
+                        height: 32,
+                        alt: 'איטי'
+                    },
+                    'slow'
+                ],
+                [
+                    {
+                        src: 'https://codejredu.github.io/test/assets/blocklyicon/walksvg.svg',
+                        width: 32,
+                        height: 32,
+                        alt: 'רגיל'
+                    },
+                    'normal'
+                ],
+                [
+                    {
+                        src: 'https://codejredu.github.io/test/assets/blocklyicon/fastspeed.svg',
+                        width: 32,
+                        height: 32,
+                        alt: 'מהיר'
+                    },
+                    'fast'
+                ]
+            ];
+            this.appendDummyInput()
+                .appendField(new Blockly.FieldImage("https://codejredu.github.io/test/assets/blocklyicon/speedsvg.svg", 34, 34, "*"))
+                .appendField(new Blockly.FieldDropdown(speedOptions), "SPEED");
+            this.setPreviousStatement(true, null);
+            this.setNextStatement(true, null);
+            this.setColour("#4C97FF");
+            this.setTooltip("קובע את מהירות התנועה של הדמות.");
+        }
+    };
+
+    Blockly.JavaScript['motion_set_speed'] = function(block) {
+        const speed = block.getFieldValue('SPEED');
+        return `
+            if (sprite) {
+                sprite.speed = '${speed}';
+                log(sprite.name + ' קבעה מהירות ל-' + '${speed}');
             }
             yield;
         `;
     };
+
     Blockly.Blocks['motion_turn_right_degrees'] = {
         init: function() {
             this.appendValueInput("DEGREES").setCheck("Number")
@@ -1415,8 +1545,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const degrees = Blockly.JavaScript.valueToCode(block, 'DEGREES', Blockly.JavaScript.ORDER_ATOMIC) || '15';
         return `
             if (sprite) {
-                // Normalize rotation to a target of 30 FPS for consistent speed
-                const rotationAmount = Number(${degrees}) * 30 * (window.frameDeltaTime / 1000);
+                const rotationAmount = Number(${degrees});
                 sprite.direction += rotationAmount;
                 window.refreshSprite(sprite);
             }
@@ -1439,8 +1568,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const degrees = Blockly.JavaScript.valueToCode(block, 'DEGREES', Blockly.JavaScript.ORDER_ATOMIC) || '15';
         return `
             if (sprite) {
-                // Normalize rotation to a target of 30 FPS for consistent speed
-                const rotationAmount = Number(${degrees}) * 30 * (window.frameDeltaTime / 1000);
+                const rotationAmount = Number(${degrees});
                 sprite.direction -= rotationAmount;
                 window.refreshSprite(sprite);
             }
@@ -1606,8 +1734,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const size = Blockly.JavaScript.valueToCode(block, 'SIZE', Blockly.JavaScript.ORDER_ATOMIC) || '10';
         return `
             if (sprite) {
-                // Normalize size change to a target of 30 FPS for consistent speed
-                const sizeChange = Number(${size}) * 30 * (window.frameDeltaTime / 1000);
+                const sizeChange = Number(${size});
                 sprite.size += sizeChange;
                 window.refreshSprite(sprite);
                 log(sprite.name + ' גדלה לגודל ' + sprite.size);
@@ -1633,8 +1760,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const size = Blockly.JavaScript.valueToCode(block, 'SIZE', Blockly.JavaScript.ORDER_ATOMIC) || '10';
         return `
             if (sprite) {
-                // Normalize size change to a target of 30 FPS for consistent speed
-                const sizeChange = Number(${size}) * 30 * (window.frameDeltaTime / 1000);
+                const sizeChange = Number(${size});
                 sprite.size = Math.max(5, sprite.size - sizeChange); // Don't let size go below 5
                 window.refreshSprite(sprite);
                 log(sprite.name + ' קטנה לגודל ' + sprite.size);
@@ -2397,6 +2523,44 @@ document.addEventListener('DOMContentLoaded', () => {
         return func(sprite, log, getExecutionCancelled, window);
     }
 
+    function createGeneratorFromBlock(startBlock, sprite) {
+        let code = '';
+        let currentBlock = startBlock;
+        while (currentBlock) {
+            code += Blockly.JavaScript.blockToCode(currentBlock);
+            if (getExecutionCancelled()) break;
+            currentBlock = currentBlock.getNextBlock();
+        }
+
+        if (!code.trim()) return null;
+
+        const GeneratorFunction = Object.getPrototypeOf(function*(){}).constructor;
+        const func = new GeneratorFunction('sprite', 'log', 'getExecutionCancelled', 'window', code);
+        
+        return func(sprite, log, getExecutionCancelled, window);
+    }
+
+    function runScriptFromBlock(startBlock) {
+        saveActiveSpriteWorkspace();
+        const sprite = getActiveSprite();
+        if (!sprite) {
+            log("No active sprite to run script.");
+            return;
+        }
+        
+        const generator = createGeneratorFromBlock(startBlock, sprite);
+        if (generator) {
+            if (!scriptRunner || !scriptRunner.isRunning) {
+                 scriptRunner = new ScriptRunner(stopAllScripts);
+                 document.getElementById('run-button').classList.add('hidden');
+                 document.getElementById('reset-button').classList.remove('hidden');
+                 fullscreenRunButton.classList.add('hidden');
+                 fullscreenResetButton.classList.remove('hidden');
+            }
+            scriptRunner.add(generator);
+        }
+    }
+
     function runScriptStack(startBlock) {
         saveActiveSpriteWorkspace();
         const sprite = getActiveSprite();
@@ -2417,29 +2581,6 @@ document.addEventListener('DOMContentLoaded', () => {
             scriptRunner.add(generator);
         }
     }
-
-    function executeBlock(blockId) {
-        const block = workspace.getBlockById(blockId);
-        if (!block || block.type.startsWith('event_')) return;
-        
-        log(`מפעיל בלוק בודד: ${block.type}`);
-        
-        const code = Blockly.JavaScript.blockToCode(block);
-        const sprite = getActiveSprite();
-        const GeneratorFunction = Object.getPrototypeOf(function*(){}).constructor;
-        // The generated code will access window.frameDeltaTime, which is updated every tick.
-        const func = new GeneratorFunction('sprite', 'log', 'getExecutionCancelled', 'window', code);
-        const generator = func(sprite, log, getExecutionCancelled, window);
-        
-        if (!scriptRunner || !scriptRunner.isRunning) {
-            scriptRunner = new ScriptRunner(stopAllScripts);
-            document.getElementById('run-button').classList.add('hidden');
-            document.getElementById('reset-button').classList.remove('hidden');
-            fullscreenRunButton.classList.add('hidden');
-            fullscreenResetButton.classList.remove('hidden');
-        }
-        scriptRunner.add(generator);
-    }
     
     const blocklyDiv = document.getElementById('blockly-area');
     blocklyDiv.addEventListener('click', (e) => {
@@ -2451,23 +2592,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 const block = workspace.getBlockById(blockId);
                 if (!block) return;
 
-                if (block.previousConnection === null && block.getParent() === null) {
-                    if (block.type === 'event_when_flag_clicked') {
-                        log('לחיצה על בלוק הדגל הירוק, מפעיל את כל התסריטים.');
-                        runCode();
-                        return;
-                    }
-                    if (['event_when_sprite_clicked', 'event_when_bump', 'event_when_key_pressed'].includes(block.type)) {
-                        runScriptStack(block);
-                        return; 
-                    }
-                }
-                
-                if (!block.outputConnection && block.getParent() === null) {
-                     executeBlock(blockId);
-                } 
-                else if (block.outputConnection) {
+                // If block has output, it's a value reporter. Show its value.
+                if (block.outputConnection) {
                     showBlockValue(block);
+                } 
+                // Otherwise, it's a command/stack block. Run it and the rest of its stack.
+                else if (block.previousConnection || !block.getParent()) {
+                    runScriptFromBlock(block);
                 }
             }
         }
@@ -2672,24 +2803,29 @@ document.addEventListener('DOMContentLoaded', () => {
         saveActiveSpriteWorkspace();
         const sprite = sprites[spriteId];
         if (!sprite || !sprite.workspaceXml) return;
-
-        if (!scriptRunner || !scriptRunner.isRunning) {
-            scriptRunner = new ScriptRunner(stopAllScripts);
-             document.getElementById('run-button').classList.add('hidden');
-             document.getElementById('reset-button').classList.remove('hidden');
-             fullscreenRunButton.classList.add('hidden');
-             fullscreenResetButton.classList.remove('hidden');
-        }
-        
+    
+        // First, check if there are any scripts to run for this event.
         const tempWorkspace = new Blockly.Workspace();
         Blockly.Xml.domToWorkspace(Blockly.Xml.textToDom(sprite.workspaceXml), tempWorkspace);
         const topBlocks = tempWorkspace.getTopBlocks(true);
         const clickScripts = topBlocks.filter(block => block.type === 'event_when_sprite_clicked');
-
-        clickScripts.forEach(startBlock => {
-            const generator = createGeneratorForStack(startBlock, sprite);
-            if (generator) scriptRunner.add(generator);
-        });
+        
+        // Only start the runner if there are actual click scripts.
+        if (clickScripts.length > 0) {
+            if (!scriptRunner || !scriptRunner.isRunning) {
+                scriptRunner = new ScriptRunner(stopAllScripts);
+                document.getElementById('run-button').classList.add('hidden');
+                document.getElementById('reset-button').classList.remove('hidden');
+                fullscreenRunButton.classList.add('hidden');
+                fullscreenResetButton.classList.remove('hidden');
+            }
+    
+            clickScripts.forEach(startBlock => {
+                const generator = createGeneratorForStack(startBlock, sprite);
+                if (generator) scriptRunner.add(generator);
+            });
+        }
+        
         tempWorkspace.dispose();
     }
     
@@ -2738,16 +2874,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function triggerBumpScripts(id1, id2) {
         saveActiveSpriteWorkspace();
-        if (!scriptRunner || !scriptRunner.isRunning) {
-            scriptRunner = new ScriptRunner(stopAllScripts);
-            document.getElementById('run-button').classList.add('hidden');
-            document.getElementById('reset-button').classList.remove('hidden');
-            fullscreenRunButton.classList.add('hidden');
-            fullscreenResetButton.classList.remove('hidden');
-        }
-
-        const runForSprite = (spriteToCheck, otherSpriteId) => {
-            if (!spriteToCheck.workspaceXml) return;
+    
+        const getBumpGenerators = (spriteToCheck, otherSpriteId) => {
+            const generators = [];
+            if (!spriteToCheck.workspaceXml) return generators;
+    
             const tempWorkspace = new Blockly.Workspace();
             try {
                 Blockly.Xml.domToWorkspace(Blockly.Xml.textToDom(spriteToCheck.workspaceXml), tempWorkspace);
@@ -2757,7 +2888,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     const targetSpriteId = scriptBlock.getFieldValue('TARGET_SPRITE');
                     if (targetSpriteId === 'ANY' || targetSpriteId === otherSpriteId) {
                         const generator = createGeneratorForStack(scriptBlock, spriteToCheck);
-                        if (generator) scriptRunner.add(generator);
+                        if (generator) generators.push(generator);
                     }
                 });
             } catch (e) {
@@ -2765,10 +2896,23 @@ document.addEventListener('DOMContentLoaded', () => {
             } finally {
                 tempWorkspace.dispose();
             }
+            return generators;
         };
-
-        runForSprite(sprites[id1], id2);
-        runForSprite(sprites[id2], id1);
+    
+        const generators1 = getBumpGenerators(sprites[id1], id2);
+        const generators2 = getBumpGenerators(sprites[id2], id1);
+        const allGenerators = [...generators1, ...generators2];
+    
+        if (allGenerators.length > 0) {
+            if (!scriptRunner || !scriptRunner.isRunning) {
+                scriptRunner = new ScriptRunner(stopAllScripts);
+                document.getElementById('run-button').classList.add('hidden');
+                document.getElementById('reset-button').classList.remove('hidden');
+                fullscreenRunButton.classList.add('hidden');
+                fullscreenResetButton.classList.remove('hidden');
+            }
+            allGenerators.forEach(gen => scriptRunner.add(gen));
+        }
     }
 
 
@@ -2890,7 +3034,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function createDefaultSprite() {
-        const defaultSprite = createNewSprite('חתול', 'https://codejredu.github.io/claudejr/GingerCat.svg', 0, 0);
+        const defaultSprite = createNewSprite('חתול', 'https://codejredu.github.io/claudejr/GingerCat.svg', { initialX: 0, initialY: 0 });
     }
 
     function handleBackdropSelection(e) {
@@ -2917,7 +3061,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (target.tagName === 'IMG' && target.classList.contains('thumbnail')) {
             const url = target.src;
             const name = target.alt || 'דמות חדשה';
-            createNewSprite(name, url, 0, 0);
+            createNewSprite(name, url);
             spriteGallery.classList.remove('visible');
         }
     }
@@ -2964,7 +3108,6 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Hide number pad when clicking outside
     document.addEventListener('click', (e) => {
-        // If the click is not on the number pad and not on a blockly field
         if (numberPad.style.display === 'block' && !numberPad.contains(e.target) && !e.target.closest('.blocklyDraggable')) {
             numberPadDone.click();
         }
@@ -3011,6 +3154,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         spriteData.size = size || 100;
         spriteData.rotationStyle = rotationStyle || 'all-around'; // Add for compatibility
+        spriteData.speed = spriteData.speed || 'instant'; // Add for compatibility
         spriteData.isGif = isGif || false;
         spriteData.gifSpeed = gifSpeed || 1.0;
         spriteData.animation = null; // Will be loaded async
@@ -3040,7 +3184,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         const wrapper = spriteContainer.querySelector('.sprite-wrapper');
-        wrapper.addEventListener('click', (e) => { e.stopPropagation(); if (justDragged) return; handleSpriteClick(id); });
         wrapper.addEventListener('mousedown', (e) => startDrag(e, id));
         wrapper.addEventListener('touchstart', (e) => startDrag(e, id));
 
@@ -3672,7 +3815,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const name = file.name.split('.')[0];
             
             if (type === 'sprite') {
-                createNewSprite(name, dataUrl, 0, 0);
+                createNewSprite(name, dataUrl);
             } else if (type === 'backdrop') {
                 const newCard = createBackdropCard(dataUrl);
                 window.switchBackdrop(dataUrl);
@@ -3733,7 +3876,7 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                  // Create new sprite
                 const newName = name || `דמות ${Object.keys(sprites).length + 1}`;
-                createNewSprite(newName, dataUrl, 0, 0, true, characterData);
+                createNewSprite(newName, dataUrl, { isCustom: true, characterData: characterData });
             }
         }
     });
